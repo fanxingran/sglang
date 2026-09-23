@@ -624,13 +624,28 @@ def _check_dsa_backend_constraints(
     """Validate DSA backend / platform / kv-cache-dtype constraints."""
     chosen = {prefill_backend, decode_backend}
 
-    rocm_only = {"triton"} & chosen
+    rocm_only = {"triton", "triton_gluon"} & chosen
     if not hip and rocm_only:
         raise ValueError(
             f"The {'/'.join(sorted(rocm_only))} DSA backend is only supported on "
             "ROCm/HIP. Pick an alternative DSA backend for CUDA "
             "(flashmla_kv on Hopper, trtllm on Blackwell)."
         )
+
+    if "triton_gluon" in chosen:
+        from sglang.kernels.ops.attention.dsa.gluon_sparse_mla import (
+            gluon_sparse_mla_unsupported_reason,
+        )
+
+        reason = gluon_sparse_mla_unsupported_reason()
+        if reason is None and kv_cache_dtype != "fp8_e4m3":
+            reason = f"it requires --kv-cache-dtype fp8_e4m3, got {kv_cache_dtype}"
+        if reason is not None:
+            raise ValueError(
+                f"The triton_gluon DSA backend is unavailable: {reason}. Use a "
+                "ROCm 10 SGLang image on MI355X, or --dsa-prefill-backend / "
+                "--dsa-decode-backend triton."
+            )
 
     cuda_fp8_unsupported = {"tilelang"} & chosen
     if not hip and kv_cache_dtype == "fp8_e4m3" and cuda_fp8_unsupported:

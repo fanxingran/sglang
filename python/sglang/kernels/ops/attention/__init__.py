@@ -178,6 +178,8 @@ del _grp, _mod, _fn
 # registered for inventory. Import them from their modules.
 for _mod, _fn in [
     ("dsa.triton_sparse_mla", "triton_sparse_mla_fwd"),
+    ("dsa.gluon_sparse_mla", "gluon_sparse_mla_fwd"),
+    ("dsa.gluon_sparse_mla", "gluon_sparse_mla_decode"),
     ("dsa.transform_index", "transform_index_page_table_prefill"),
     ("dsa.transform_index", "transform_index_page_table_decode"),
     ("dsa.transform_index", "prepare_trtllm_nope_sparse_metadata"),

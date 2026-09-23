@@ -339,6 +339,7 @@ def _fused_rope_cat_and_cache(
     k_pe: torch.Tensor,
     positions: torch.Tensor,
     out_cache_loc: torch.Tensor,
+    bf16_query: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """RoPE + concat + KV-cache write via the AITER fused kernel on gfx95."""
     kv_cache_dtype = (
@@ -347,9 +348,12 @@ def _fused_rope_cat_and_cache(
     # Gluon MLA decode (bh16bn128) requires bf16 Q; vLLM #50563.
     q_out_dtype = (
         q_nope_out.dtype
-        if attn.kv_cache_dtype == "fp8_e4m3"
-        and attn.current_attention_backend == "aiter"
-        and q_nope_out.shape[-2] == 12
+        if bf16_query
+        or (
+            attn.kv_cache_dtype == "fp8_e4m3"
+            and attn.current_attention_backend == "aiter"
+            and q_nope_out.shape[-2] == 12
+        )
         else kv_cache_dtype
     )
     kv_pool = get_token_to_kv_pool()
@@ -698,6 +702,7 @@ class DeepseekMLARocmForwardMixin:
                     k_pe,
                     positions,
                     forward_batch.out_cache_loc,
+                    bf16_query=self._dsa_triton_gluon_active(forward_batch),
                 )
                 save_kv_cache = False
                 # Pass q_cat straight to attn_mqa with q_rope=None so the backend
@@ -951,10 +956,27 @@ class DeepseekMLARocmForwardMixin:
             _use_aiter_gfx95
             and self.current_attention_backend in ("dsa", "nsa")
             and (
-                get_exec().kernel.dsa_decode_backend in ("tilelang", "triton")
-                or get_exec().kernel.dsa_prefill_backend in ("tilelang", "triton")
+                get_exec().kernel.dsa_decode_backend
+                in ("tilelang", "triton", "triton_gluon")
+                or get_exec().kernel.dsa_prefill_backend
+                in ("tilelang", "triton", "triton_gluon")
             )
         )
+
+    def _dsa_triton_gluon_active(
+        self: DeepseekV2AttentionMLA, forward_batch: ForwardBatch
+    ) -> bool:
+        """Whether this forward's DSA phase runs triton_gluon, which takes BF16 q."""
+        mode = forward_batch.forward_mode
+        kernel = get_exec().kernel
+        backend = (
+            kernel.dsa_decode_backend
+            if mode.is_decode_or_idle()
+            or mode.is_target_verify()
+            or mode.is_draft_extend_v2()
+            else kernel.dsa_prefill_backend
+        )
+        return backend == "triton_gluon"
 
     def _skip_rope_for_aiter_fused_mla(self: DeepseekV2AttentionMLA) -> bool:
         """

@@ -290,6 +290,7 @@ _DSA_IMPL_T: TypeAlias = Literal[
     "fa3",
     "tilelang",
     "triton",
+    "triton_gluon",
     "trtllm",
     "intel_xpu",
 ]
@@ -470,6 +471,30 @@ class DeepseekSparseAttnBackend(
                 "flashmla_sparse_q8 is a prefill-only backend. For FP8, use "
                 "--dsa-prefill-backend flashmla_sparse_q8 together with "
                 "--dsa-decode-backend flashmla_kv."
+            )
+
+        if "triton_gluon" in (self.dsa_prefill_impl, self.dsa_decode_impl):
+            from sglang.kernels.ops.attention.dsa.gluon_sparse_mla import (
+                gluon_sparse_mla_contract_error,
+            )
+
+            error = gluon_sparse_mla_contract_error(
+                num_heads=self.num_q_heads,
+                kv_lora_rank=self.kv_lora_rank,
+                qk_rope_head_dim=self.qk_rope_head_dim,
+                topk=self.dsa_index_topk,
+                kv_cache_dtype=self.kv_cache_dtype,
+            )
+            if error is not None:
+                raise ValueError(
+                    f"The triton_gluon DSA backend cannot serve this model: {error}."
+                )
+            logger.info(
+                "Using triton_gluon sparse MLA for DSA (prefill=%s, decode=%s, "
+                "local heads=%d).",
+                self.dsa_prefill_impl,
+                self.dsa_decode_impl,
+                self.num_q_heads,
             )
 
         # Q8KV8 per-call device-tensor caches, populated lazily on the first
@@ -2061,6 +2086,19 @@ class DeepseekSparseAttnBackend(
                 sm_scale=layer.scaling,
                 d_v=layer.v_head_dim,
             )
+        elif dsa_impl == "triton_gluon":
+            from sglang.kernels.ops.attention.dsa.gluon_sparse_mla import (
+                gluon_sparse_mla_fwd,
+            )
+
+            return gluon_sparse_mla_fwd(
+                q_nope=q_nope,
+                q_rope=q_rope,
+                kv=kv_cache,
+                indices=page_table_1.unsqueeze(1),
+                sm_scale=layer.scaling,
+                d_v=layer.v_head_dim,
+            )
         elif dsa_impl in ("flashmla_sparse", "flashmla_sparse_q8"):
             if topk_transform_method == TopkTransformMethod.RAGGED:
                 _has_prefix = any(forward_batch.extend_prefix_lens_cpu)
@@ -2365,6 +2403,19 @@ class DeepseekSparseAttnBackend(
                 v_head_dim=layer.v_head_dim,
                 page_table_1=page_table_1,
                 sm_scale=layer.scaling,
+            )
+        elif dsa_impl == "triton_gluon":
+            from sglang.kernels.ops.attention.dsa.gluon_sparse_mla import (
+                gluon_sparse_mla_decode,
+            )
+
+            return gluon_sparse_mla_decode(
+                q_nope=q_nope,
+                q_rope=q_rope,
+                kv=kv_cache,
+                indices=page_table_1.unsqueeze(1),
+                sm_scale=layer.scaling,
+                d_v=layer.v_head_dim,
             )
         elif dsa_impl == "fa3":
             return self._forward_fa3(

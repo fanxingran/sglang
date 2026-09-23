@@ -2076,6 +2076,9 @@ class TestGoldenModelOverrides(_IsolatedPublish):
             self.assertEqual(
                 _dsa_split_backend_resolution(_view(arch="LlamaForCausalLM")), {}
             )
+            # triton_gluon is ROCm-only
+            with self.assertRaisesRegex(ValueError, "only supported on ROCm"):
+                _dsa_split_backend_resolution(_view(dsa_decode_backend="triton_gluon"))
         with (
             patch("sglang.srt.configs.model_config.is_deepseek_dsa", return_value=True),
             override_platform(is_npu=False),
@@ -2105,6 +2108,42 @@ class TestGoldenModelOverrides(_IsolatedPublish):
                     "dsa_decode_backend": "triton",
                 },
             )
+            # triton_gluon is explicit-only and gated on the Gluon runtime.
+            reason = (
+                "sglang.kernels.ops.attention.dsa.gluon_sparse_mla."
+                "gluon_sparse_mla_unsupported_reason"
+            )
+            with patch(reason, return_value=None):
+                self.assertEqual(
+                    _dsa_split_backend_resolution(
+                        _view(dsa_decode_backend="triton_gluon")
+                    ),
+                    {"dsa_prefill_backend": "triton"},
+                )
+                self.assertEqual(
+                    _dsa_split_backend_resolution(
+                        _view(
+                            dsa_prefill_backend="triton_gluon",
+                            dsa_decode_backend="triton_gluon",
+                        )
+                    ),
+                    {},
+                )
+                with self.assertRaisesRegex(ValueError, "fp8_e4m3"):
+                    _dsa_split_backend_resolution(
+                        _view(
+                            kv_cache_dtype="bfloat16",
+                            dsa_decode_backend="triton_gluon",
+                        )
+                    )
+            with patch(
+                reason,
+                return_value="it requires Triton >= 3.8.0, found Triton 3.7.0",
+            ):
+                with self.assertRaisesRegex(ValueError, "Triton >= 3.8.0"):
+                    _dsa_split_backend_resolution(
+                        _view(dsa_prefill_backend="triton_gluon")
+                    )
 
     def test_flashinfer_allreduce_fusion_passes(self):
         from sglang.srt.arg_groups.overrides import (
