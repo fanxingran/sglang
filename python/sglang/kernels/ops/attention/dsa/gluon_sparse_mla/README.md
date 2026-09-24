@@ -2,7 +2,7 @@
 
 跟踪分支，不向上游提交。分支 `amd-dsa-triton-gluon`，commit `393d7ba9fa`，仓库 `https://github.com/fanxingran/sglang`。
 
-在 SGLang 里加了一个可选的 DSA backend `triton_gluon`。Kernel 来自 Artemis PR 11（`OpenAI-Partners/artemis-kernel-integrations@14eb5a6`）的 GLM-5.2 sparse paged MLA，按 head 数和行数原样放进本目录。默认 backend 仍是 `triton`。AgentX 官方口径下端到端收益大约 1–3%，见文末结论，所以这套代码只留在本分支供以后对照。
+在 SGLang 里加了一个可选的 DSA backend `triton_gluon`。Kernel 来自 Artemis PR 11（`OpenAI-Partners/artemis-kernel-integrations@14eb5a6`）的 GLM-5.2 sparse paged MLA，按 head 数和行数原样放进本目录。默认 backend 仍是 `triton`。AgentX 官方口径的 P90 Interactivity：TP4/EP4/C8 是 +1.5%，TP8/EP1/C1 是 −3.5%。不是两个格子都有正收益，见文末结论。这套代码只留在本分支供以后对照。
 
 ## 代码在哪
 
@@ -207,6 +207,6 @@ Kernel 的 1.4–1.8 倍是每层大约 20 µs 的 sparse MLA。Verify 是 78 �
 
 官方 AgentX 的 C=8 没有把 decode batch 维持在 8，实际 batch 大约是 1–2，跑的是表里 M=6 和 M=12，不是 M=48 的 1.80 倍。
 
-TP8/C1 的 1.58 倍来自 `h8_m8`。2.31 GB 的 pool 让它断言失败，serving 改走 `h8_m16`（microbench 上仍是 12.6 µs 对 Triton 的 19.2 µs）和 `h8_m1`。预期仍是小幅变快。测到的 ITL +1.3% 与此相反，幅度小于 OSL +9.4% 带来的回放差异，每组只有一次 1200 s。
+TP8/C1 的 1.58 倍来自 `h8_m8`。2.31 GB 的 pool 让它断言失败，serving 改走 `h8_m16`（microbench 上仍是 12.6 µs 对 Triton 的 19.2 µs）和 `h8_m1`。预期仍是小幅变快。榜单口径的 P90 Interactivity 是 −3.5%（232.87 对 241.20 tok/s/user），TPOT mean 是 +1.5%。方向和 kernel 预期相反，幅度小于这一臂 OSL +9.4% 的回放差异，每组只有一次 1200 s。
 
 把 verify 的 sparse MLA 时间算成 0，这一档也只剩大约 6% 的 ITL。Decode kernel 再快，AgentX interactivity 的空间就在这里。Prefill 上 Gluon 没有稳定优势；同模型上改 Triton launch 的 [sglang#39059](https://github.com/sgl-project/sglang/pull/39059) 动的是 TTFT，和这条路不是一回事。
