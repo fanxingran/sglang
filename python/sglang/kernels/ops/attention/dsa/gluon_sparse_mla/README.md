@@ -94,7 +94,9 @@ python3 -m pytest -q \
 
 方法：16 层不同的 query、KV、slots 抓进一张 HIP graph，回放 50 次取 p50。cold 是每层前 `zero_` 512 MB，把 L2 和 MALL 挤掉。top-k 2048 全有效，KV pool 每层 2^18 行。脚本在工作区 `glm52-mla-port/scripts/bench_sparse_mla_graph.py`，两次独立运行取平均。M=84 是同脚本补的一次运行。单位是每层微秒。
 
-Verify 走 SGLang 的 `triton_sparse_mla_fwd`。Gluon 没有该行数的 kernel 时 pad 到下一个 2 的幂，空行 slot 填 `-1`。M = decode batch × 6（EAGLE 6 个 draft token）。
+这张表是裸 kernel，不是 serving 入口。pad 在计时前做完，不计入时间。KV pool 只有 2^18 行，`buffer_load` 开着。TP8 M=6 的 1.58 倍来自直接调用 `h8_m8`。`h8_m8` 有 `assert cache_span < 2**31`，TP8/C1 的 2.31 GB pool 上不会被调用。
+
+Verify 的 Triton 列是 `triton_sparse_mla_fwd`。Gluon 没有该行数的 kernel 时 pad 到下一个 2 的幂，空行 slot 填 `-1`。M = decode batch × 6（EAGLE 6 个 draft token）。
 
 TP4（16 heads），cold：
 
@@ -120,7 +122,19 @@ TP8（8 heads），cold：
 | 12 | 72 | 62.8 | 37.9 | 1.66x | h8_m128 |
 | 14 | 84 | 61.9 | 38.9 | 1.59x | h8_m128 |
 
-Draft decode 走 `triton_sparse_mla_decode_splitk`，每 cycle 5 次、每次 1 层。TP4 cold：M=1 是 13.2 对 8.7 µs（1.52x），M=2 是 14.5 对 10.2（1.42x），M=8 是 20.2 对 14.7（1.38x）。TP8 cold：M=1 是 12.7 对 8.0（1.58x）。
+### TP8/C1 实际入口（dispatcher）
+
+脚本 `glm52-mla-port/scripts/bench_dispatch_graph.py`，调用 `gluon_sparse_mla_fwd`。pad 在 HIP graph 里面。verify M=6，cold，每层微秒：
+
+| KV pool | 层数 | Triton | Gluon | 结果 |
+|---|---:|---:|---:|---|
+| 262,144 行 | 2 | 19.4 | 19.7 | 0.98x |
+| 3,998,784 行 | 2 | 20.9 | 25.1 | 0.83x |
+| 3,998,784 行 | 4 | 19.2 | 23.6 | 0.81x |
+
+4M 行上 dispatcher 跳过 `h8_m8`，改用 `h8_m16`，并且 `h8_m16` 在 `cache_span >= 2**31` 时关掉 `buffer_load`。Gluon 比 Triton 慢大约 4–5 µs/层。79 层多出来约 0.3–0.4 ms，相对 TP8 一步约 14 ms，是 +2% 到 +3% 的 ITL。Triton 的 19.2 µs 和上面裸 kernel 表一致；变的是 Gluon 这一列。
+
+Draft decode 走 `triton_sparse_mla_decode_splitk`，每 cycle 5 次、每次 1 层。下面同样是 2^18 行的裸 kernel。TP4 cold：M=1 是 13.2 对 8.7 µs（1.52x），M=2 是 14.5 对 10.2（1.42x），M=8 是 20.2 对 14.7（1.38x）。TP8 cold：M=1 是 12.7 对 8.0（1.58x）。
 
 Prefill（生产形态的 top-k，页大小 64，TP4）加速大约 1.0–1.26 倍，overlap 很低时接近 1.0，均匀 slot 时有的点低于 1。脚本是 `glm52-mla-port/scripts/bench_prefill_real.py`。
 
@@ -207,6 +221,6 @@ Kernel 的 1.4–1.8 倍是每层大约 20 µs 的 sparse MLA。Verify 是 78 �
 
 官方 AgentX 的 C=8 没有把 decode batch 维持在 8，实际 batch 大约是 1–2，跑的是表里 M=6 和 M=12，不是 M=48 的 1.80 倍。
 
-TP8/C1 的 1.58 倍来自 `h8_m8`。2.31 GB 的 pool 让它断言失败，serving 改走 `h8_m16`（microbench 上仍是 12.6 µs 对 Triton 的 19.2 µs）和 `h8_m1`。预期仍是小幅变快。榜单口径的 P90 Interactivity 是 −3.5%（232.87 对 241.20 tok/s/user），TPOT mean 是 +1.5%。方向和 kernel 预期相反，幅度小于这一臂 OSL +9.4% 的回放差异，每组只有一次 1200 s。
+TP8/C1 的裸 kernel 1.58 倍来自 `h8_m8`，2.31 GB 的 pool 上不会执行。同一批请求按 trace turn 配对（116 对，OSL 中位数变化为 0）后，ITL 中位数是 +2.7%，interactivity 中位数是 −2.6%。榜单口径的 P90 Interactivity 是 −3.5%（232.87 对 241.20 tok/s/user），和上面 dispatcher 在 4M 行上的 0.81–0.83 倍一致，不是回放噪声。
 
 把 verify 的 sparse MLA 时间算成 0，这一档也只剩大约 6% 的 ITL。Decode kernel 再快，AgentX interactivity 的空间就在这里。Prefill 上 Gluon 没有稳定优势；同模型上改 Triton launch 的 [sglang#39059](https://github.com/sgl-project/sglang/pull/39059) 动的是 TTFT，和这条路不是一回事。
